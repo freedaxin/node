@@ -21,6 +21,7 @@
 
 var common = require('../common');
 var assert = require('assert');
+var fs = require('fs');
 
 var TCP = process.binding('tcp_wrap').TCP;
 
@@ -36,6 +37,14 @@ var slice, sliceCount = 0, eofCount = 0;
 var writeCount = 0;
 var recvCount = 0;
 
+// write a buffer larger than tcp_wmem_max
+var tcp_wmem_max = parseInt(fs.readFileSync('/proc/sys/net/core/wmem_max', 'utf8'));
+var buf = new Buffer(tcp_wmem_max+10);
+buf.fill("x");
+
+var serverRecvedBuf = new Buffer(0);
+var clientRecvedBuf = new Buffer(0);
+
 server.onconnection = function(client) {
   assert.equal(0, client.writeQueueSize);
   console.log('got connection');
@@ -47,37 +56,35 @@ server.onconnection = function(client) {
     }
   }
 
-  client.readStart();
   client.pendingWrites = [];
+  client.readStart();
+
+  var req = client.writeBuffer(buf);
+  client.pendingWrites.push(req);
+
+  console.log('client.writeQueueSize: ' + client.writeQueueSize);
+
+  req.oncomplete = function(status, client_, req_) {
+    assert.equal(req, client.pendingWrites.shift());
+
+    // Check parameters.
+    assert.equal(0, status);
+    assert.equal(client, client_);
+    assert.equal(req, req_);
+
+    console.log('oncomplete, client.writeQueueSize: ' + client.writeQueueSize);
+    assert.equal(0, client.writeQueueSize);
+
+    writeCount++;
+    console.log('write ' + writeCount);
+    maybeCloseClient();
+  };
+
   client.onread = function(buffer, offset, length) {
     if (buffer) {
       assert.ok(length > 0);
 
-      assert.equal(0, client.writeQueueSize);
-
-      var req = client.writeBuffer(buffer.slice(offset, offset + length));
-      client.pendingWrites.push(req);
-
-      console.log('client.writeQueueSize: ' + client.writeQueueSize);
-      // 11 bytes should flush
-      assert.equal(0, client.writeQueueSize);
-
-      req.oncomplete = function(status, client_, req_) {
-        assert.equal(req, client.pendingWrites.shift());
-
-        // Check parameters.
-        assert.equal(0, status);
-        assert.equal(client, client_);
-        assert.equal(req, req_);
-
-        console.log('client.writeQueueSize: ' + client.writeQueueSize);
-        assert.equal(0, client.writeQueueSize);
-
-        writeCount++;
-        console.log('write ' + writeCount);
-        maybeCloseClient();
-      };
-
+      serverRecvedBuf = Buffer.concat([serverRecvedBuf, buffer.slice(offset, offset + length)]);
       sliceCount++;
     } else {
       console.log('eof');
@@ -92,14 +99,14 @@ server.onconnection = function(client) {
 var net = require('net');
 
 var c = net.createConnection(common.PORT);
-c.on('connect', function() {
-  c.end('hello world');
-});
 
-c.setEncoding('utf8');
 c.on('data', function(d) {
-  assert.equal('hello world', d);
+  c.write(d);
+  clientRecvedBuf = Buffer.concat([clientRecvedBuf, d]);
   recvCount++;
+  if (clientRecvedBuf.length >= buf.length) {
+    c.end();
+  };
 });
 
 c.on('close', function() {
@@ -107,10 +114,9 @@ c.on('close', function() {
 });
 
 process.on('exit', function() {
-  assert.equal(1, sliceCount);
+  assert.equal(serverRecvedBuf.length, buf.length);
+  assert.ok(sliceCount > 1);
   assert.equal(1, eofCount);
   assert.equal(1, writeCount);
-  assert.equal(1, recvCount);
+  assert.ok(recvCount > 1);
 });
-
-

@@ -35,6 +35,7 @@ enum WriteEncoding {
   kUcs2
 };
 
+class WriteWrap;
 
 class StreamWrap : public HandleWrap {
  public:
@@ -60,6 +61,7 @@ class StreamWrap : public HandleWrap {
   virtual void SetHandle(uv_handle_t* h);
   void StateChange() { }
   void UpdateWriteQueueSize();
+  int WrapWrite(WriteWrap* req_wrap, uv_buf_t buf, uv_stream_t* send_stream);
 
  private:
   static inline char* NewSlab(v8::Handle<v8::Object> global, v8::Handle<v8::Object> wrap_obj);

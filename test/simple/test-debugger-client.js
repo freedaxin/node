@@ -168,7 +168,8 @@ function doTest(cb, done) {
         var c = new debug.Client();
         process.stdout.write('>>> connecting...');
         c.connect(debug.port);
-        c.on('ready', function() {
+        setTimeout(function() {
+          // Wait for debugger to be ready
           connectCount++;
           console.log('ready!');
           cb(c, function() {
@@ -176,7 +177,7 @@ function doTest(cb, done) {
             nodeProcess.kill();
             done();
           });
-        });
+        }, 100);
       }, 100);
     }
   });

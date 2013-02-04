@@ -172,13 +172,13 @@ addTest('now', [
 ]);
 
 function finish() {
-  // Exit debugger repl
+  quit();
   child.kill('SIGINT');
-  child.kill('SIGINT');
-
-  // Exit debugger
-  child.kill('SIGINT');
-  process.exit(0);
+  child.kill('SIGTERM');
+  // give the sigkill time to work.
+  setTimeout(function() {
+    process.exit(0);
+  }, 100);
 }
 
 function quit() {

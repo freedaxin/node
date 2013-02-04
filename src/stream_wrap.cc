@@ -282,6 +282,37 @@ void StreamWrap::OnRead2(uv_pipe_t* handle, ssize_t nread, uv_buf_t buf,
   OnReadCommon(reinterpret_cast<uv_stream_t*>(handle), nread, buf, pending);
 }
 
+int StreamWrap::WrapWrite(WriteWrap* req_wrap, uv_buf_t buf, uv_stream_t* send_stream) {
+  int r;
+  if (send_stream == NULL) {
+    r = uv_write(&req_wrap->req_,
+                  stream_,
+                  &buf,
+                  1,
+                  StreamWrap::AfterWrite);
+  } else {
+    r = uv_write2(&req_wrap->req_,
+                  stream_,
+                  &buf,
+                  1,
+                  send_stream,
+                  StreamWrap::AfterWrite);
+  }
+
+  req_wrap->Dispatched();
+  req_wrap->object_->Set(bytes_sym, Number::New((uint32_t)(buf.len)));
+
+  UpdateWriteQueueSize();
+
+  if (r == 0) {
+    if (stream_->type == UV_TCP) {
+      NODE_COUNT_NET_BYTES_SENT(buf.len);
+    } else if (stream_->type == UV_NAMED_PIPE) {
+      NODE_COUNT_PIPE_BYTES_SENT(buf.len);
+    }
+  }
+  return r;
+}
 
 Handle<Value> StreamWrap::WriteBuffer(const Arguments& args) {
   HandleScope scope;
@@ -301,25 +332,27 @@ Handle<Value> StreamWrap::WriteBuffer(const Arguments& args) {
     return scope.Close(v8::Null(node_isolate));
   }
 
+  uv_buf_t buf;
+  buf.base = Buffer::Data(buffer_obj) + offset;
+  buf.len = length;
+
+  int n = uv_try_write(wrap->stream_, buf.base, buf.len);
+  if (n < 0) {
+    SetErrno(uv_last_error(uv_default_loop()));
+    return scope.Close(v8::Null(node_isolate));
+  } else if ((size_t)n < buf.len) {
+    buf.base += n;
+    buf.len -= n;
+  } else {
+    return scope.Close(v8::Number::New(buf.len));
+  }
+
   char* storage = new char[sizeof(WriteWrap)];
   WriteWrap* req_wrap = new (storage) WriteWrap();
 
   req_wrap->object_->SetHiddenValue(buffer_sym, buffer_obj);
 
-  uv_buf_t buf;
-  buf.base = Buffer::Data(buffer_obj) + offset;
-  buf.len = length;
-
-  int r = uv_write(&req_wrap->req_,
-                   wrap->stream_,
-                   &buf,
-                   1,
-                   StreamWrap::AfterWrite);
-
-  req_wrap->Dispatched();
-  req_wrap->object_->Set(bytes_sym, Number::New((uint32_t) length));
-
-  wrap->UpdateWriteQueueSize();
+  int r = wrap->WrapWrite(req_wrap, buf, NULL);
 
   if (r) {
     SetErrno(uv_last_error(uv_default_loop()));
@@ -327,12 +360,6 @@ Handle<Value> StreamWrap::WriteBuffer(const Arguments& args) {
     delete[] storage;
     return scope.Close(v8::Null(node_isolate));
   } else {
-    if (wrap->stream_->type == UV_TCP) {
-      NODE_COUNT_NET_BYTES_SENT(length);
-    } else if (wrap->stream_->type == UV_NAMED_PIPE) {
-      NODE_COUNT_PIPE_BYTES_SENT(length);
-    }
-
     return scope.Close(req_wrap->object_);
   }
 }
@@ -392,7 +419,7 @@ Handle<Value> StreamWrap::WriteStringImpl(const Arguments& args) {
   }
 
   char* storage = new char[sizeof(WriteWrap) + storage_size + 15];
-  WriteWrap* req_wrap = new (storage) WriteWrap();
+  WriteWrap* req_wrap = NULL;
 
   char* data = reinterpret_cast<char*>(ROUND_UP(
       reinterpret_cast<uintptr_t>(storage) + sizeof(WriteWrap), 16));
@@ -429,16 +456,9 @@ Handle<Value> StreamWrap::WriteStringImpl(const Arguments& args) {
   bool ipc_pipe = wrap->stream_->type == UV_NAMED_PIPE &&
                   ((uv_pipe_t*)wrap->stream_)->ipc;
 
-  if (!ipc_pipe) {
-    r = uv_write(&req_wrap->req_,
-                 wrap->stream_,
-                 &buf,
-                 1,
-                 StreamWrap::AfterWrite);
-
-  } else {
-    uv_handle_t* send_handle = NULL;
-
+  uv_handle_t* send_handle = NULL;
+  if (ipc_pipe) {
+    req_wrap = new (storage) WriteWrap();
     if (args[1]->IsObject()) {
       Local<Object> send_handle_obj = args[1]->ToObject();
       assert(send_handle_obj->InternalFieldCount() > 0);
@@ -454,19 +474,23 @@ Handle<Value> StreamWrap::WriteStringImpl(const Arguments& args) {
       assert(!req_wrap->object_.IsEmpty());
       req_wrap->object_->Set(handle_sym, send_handle_obj);
     }
-
-    r = uv_write2(&req_wrap->req_,
-                  wrap->stream_,
-                  &buf,
-                  1,
-                  reinterpret_cast<uv_stream_t*>(send_handle),
-                  StreamWrap::AfterWrite);
+  } else {
+    int n = uv_try_write(wrap->stream_, buf.base, buf.len);
+    if (n < 0) {
+      SetErrno(uv_last_error(uv_default_loop()));
+      delete[] storage;
+      return scope.Close(v8::Null(node_isolate));
+    } else if ((size_t)n < buf.len) {
+      buf.base += n;
+      buf.len -= n;
+      req_wrap = new (storage) WriteWrap();
+    } else {
+      delete[] storage;
+      return scope.Close(v8::Number::New(buf.len));
+    }
   }
 
-  req_wrap->Dispatched();
-  req_wrap->object_->Set(bytes_sym, Number::New((uint32_t) data_size));
-
-  wrap->UpdateWriteQueueSize();
+  r = wrap->WrapWrite(req_wrap, buf, reinterpret_cast<uv_stream_t*>(send_handle));
 
   if (r) {
     SetErrno(uv_last_error(uv_default_loop()));
@@ -474,12 +498,6 @@ Handle<Value> StreamWrap::WriteStringImpl(const Arguments& args) {
     delete[] storage;
     return scope.Close(v8::Null(node_isolate));
   } else {
-    if (wrap->stream_->type == UV_TCP) {
-      NODE_COUNT_NET_BYTES_SENT(buf.len);
-    } else if (wrap->stream_->type == UV_NAMED_PIPE) {
-      NODE_COUNT_PIPE_BYTES_SENT(buf.len);
-    }
-
     return scope.Close(req_wrap->object_);
   }
 }

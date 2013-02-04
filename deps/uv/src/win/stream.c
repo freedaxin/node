@@ -159,10 +159,39 @@ int uv_write2(uv_write_t* req, uv_stream_t* handle, uv_buf_t bufs[], int bufcnt,
 }
 
 
+ssize_t uv_try_write(uv_stream_t* handle, const void* buf, size_t count) {
+  ssize_t n;
+  if (handle->type != UV_TCP) {
+    // only try write for tcp
+    return 0;
+  }
+  if (!(handle->flags & UV_HANDLE_WRITABLE)) {
+    uv__set_artificial_error(handle->loop, UV_EPIPE);
+    return -1;
+  }
+  if(handle->write_queue_size > 0) {
+    /* do not write if there is data waiting in queue */
+    return 0;
+  }
+
+  n = send(((uv_tcp_t*) handle)->socket, buf, count, 0);
+
+  if (n == SOCKET_ERROR) {
+    int last_err = WSAGetLastError();
+    if (last_err == WSAEWOULDBLOCK || last_err == WSAEINTR) {
+      return 0;
+    }
+    uv__set_sys_error(handle->loop, last_err);
+    return -1;
+  }
+  return n;
+}
+
+
 int uv_shutdown(uv_shutdown_t* req, uv_stream_t* handle, uv_shutdown_cb cb) {
   uv_loop_t* loop = handle->loop;
 
- if (!(handle->flags & UV_HANDLE_WRITABLE)) {
+  if (!(handle->flags & UV_HANDLE_WRITABLE)) {
     uv__set_artificial_error(loop, UV_EPIPE);
     return -1;
   }

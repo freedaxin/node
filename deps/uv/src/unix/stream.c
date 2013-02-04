@@ -1242,6 +1242,31 @@ int uv_write(uv_write_t* req, uv_stream_t* stream, uv_buf_t bufs[], int bufcnt,
 }
 
 
+ssize_t uv_try_write(uv_stream_t* stream, const void* buf, size_t count) {
+  ssize_t n;
+  if (stream->type != UV_TCP) {
+    /* only try write for tcp */
+    return 0;
+  }
+
+  if(stream->write_queue_size > 0 || stream->connect_req) {
+    /* do not write if there is data waiting in queue, or the socket is connecting */
+    return 0;
+  }
+
+  n = write(uv__stream_fd(stream), buf, count);
+
+  if (n < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      return 0;
+    }
+    uv__set_sys_error(stream->loop, errno);
+    return -1;
+  }
+  return n;
+}
+
+
 static int uv__read_start_common(uv_stream_t* stream,
                                  uv_alloc_cb alloc_cb,
                                  uv_read_cb read_cb,

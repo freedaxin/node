@@ -594,6 +594,15 @@ UV_EXTERN int uv_write(uv_write_t* req, uv_stream_t* handle,
 UV_EXTERN int uv_write2(uv_write_t* req, uv_stream_t* handle, uv_buf_t bufs[],
     int bufcnt, uv_stream_t* send_handle, uv_write_cb cb);
 
+/*
+ * try to write as many data as possible into system buffer for nonblocking io,
+ * if all data is written successfully, async uv wirte can be avoid.
+ * On success, returns the number of bytes sent.
+ * On error, retruns 0 if it needs retry,
+ * otherwise returns -1, and uv__set_sys_error() is called.
+ */
+UV_EXTERN ssize_t uv_try_write(uv_stream_t* handle, const void* buf, size_t count);
+
 /* uv_write_t is a subclass of uv_req_t */
 struct uv_write_s {
   UV_REQ_FIELDS
